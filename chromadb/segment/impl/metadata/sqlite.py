@@ -653,7 +653,6 @@ def _where_clause(
         LiteralValue,
         Dict[WhereOperator, LiteralValue],
         Dict[InclusionExclusionOperator, List[LiteralValue]],
-        
     ],
     metadata_q: QueryBuilder,
     metadata_t: Table,
@@ -717,10 +716,10 @@ def _value_criterion(
             expr = col == p_val
         elif op == "$like":
             search_term = f"{cast(str, value)}"
-            col_exprs = [col.like(ParameterValue(search_term)) for col in cols]
+            expr = col.like(search_term)
         elif op == "$nlike":
             search_term = f"{cast(str, value)}"
-            col_exprs = [col.not_like(ParameterValue(search_term)) for col in cols]
+            expr = col.not_like(search_term)
         else:
             expr = col.isin(p_val)
 
