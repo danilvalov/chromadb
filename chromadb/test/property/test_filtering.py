@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional, cast
 import uuid
 from hypothesis import example, given, settings, HealthCheck
@@ -59,6 +60,21 @@ def _filter_where_clause(clause: Where, metadata: Optional[Metadata]) -> bool:
         return key in metadata and metadata[key] in val  # type: ignore[operator]
     elif op == "$nin":
         return key not in metadata or metadata[key] not in val  # type: ignore[operator]
+
+    elif op == "$like":
+        assert isinstance(val, str)
+        if "%" in val or "_" in val:
+            val1 = val.replace("%", "(.*)").replace("_", ".")
+            doc = str(metadata[key])
+            return re.search(val1, doc) is not None
+        return val in str(metadata[key])
+    elif op == "$nlike":
+        assert isinstance(val, str)
+        if "%" in val or "_" in val:
+            val1 = val.replace("%", "(.*)").replace("_", ".")
+            doc = str(metadata[key])
+            return re.search(val1, doc) is None
+        return val not in str(metadata[key])
 
     # The following conditions only make sense for numeric values
     assert (
@@ -148,7 +164,9 @@ def _filter_embedding_set(
 
 
 collection_st = st.shared(
-    strategies.collections(add_filterable_data=True, with_hnsw_params=True),
+    strategies.collections(
+        add_filterable_data=True, with_hnsw_params=True, uses_metadata_like=True
+    ),
     key="coll",
 )
 recordset_st = st.shared(
@@ -231,6 +249,7 @@ def test_filterable_metadata_get(
         dtype="float32",
         known_metadata_keys={},
         known_document_keywords=[],
+        known_metadata_strkeys=[],
     ),
     record_set=strategies.RecordSet(
         ids=[str(i) for i in range(11)],

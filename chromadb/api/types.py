@@ -845,6 +845,11 @@ def validate_where(where: Where) -> None:
                         raise ValueError(
                             f"Expected operand value to be an list for operator {operator}, got {operand}"
                         )
+                if operator in ["$like", "$nlike"]:
+                    if not isinstance(operand, str):
+                        raise ValueError(
+                            f"Expected operand value to be an string for operator {operator}, got {operand}"
+                        )
                 if operator not in [
                     "$gt",
                     "$gte",
@@ -854,10 +859,12 @@ def validate_where(where: Where) -> None:
                     "$eq",
                     "$in",
                     "$nin",
+                    "$like",
+                    "$nlike",
                 ]:
                     raise ValueError(
-                        f"Expected where operator to be one of $gt, $gte, $lt, $lte, $ne, $eq, $in, $nin, "
-                        f"got {operator}"
+                        "Expected where operator to be one of $gt, $gte, $lt, $lte, $ne, $eq, $in, $nin, $like, $nlike,",
+                        f"got {operator}",
                     )
 
                 if not isinstance(operand, (str, int, float, list)):

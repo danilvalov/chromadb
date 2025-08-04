@@ -276,8 +276,10 @@ class Collection(ExternalCollection):
     dtype: npt.DTypeLike
     known_metadata_keys: types.Metadata
     known_document_keywords: List[str]
+    known_metadata_strkeys: List[str]  # types.Metadata
     has_documents: bool = False
     has_embeddings: bool = False
+    has_like_metadata: bool = False
 
 
 @st.composite
@@ -287,16 +289,21 @@ def collections(
     with_hnsw_params: bool = False,
     has_embeddings: Optional[bool] = None,
     has_documents: Optional[bool] = None,
+    uses_metadata_like: Optional[bool] = False,
     with_persistent_hnsw_params: st.SearchStrategy[bool] = st.just(False),
     max_hnsw_batch_size: int = 2000,
     max_hnsw_sync_threshold: int = 2000,
 ) -> Collection:
-    """Strategy to generate a Collection object. If add_filterable_data is True, then known_metadata_keys and known_document_keywords will be populated with consistent data."""
+    """Strategy to generate a Collection object.
+    If add_filterable_data is True, then known_metadata_keys and known_document_keywords will be populated with consistent data.
+    uses_metadata_like will require the generation of an additional metadata string key to be used to test the $like/$nlike operators.
+    """
 
     assert not ((has_embeddings is False) and (has_documents is False))
 
     name = draw(collection_name())
     metadata = draw(collection_metadata)
+    like_fields_size = 3
     dimension = draw(st.integers(min_value=2, max_value=2048))
     dtype = draw(st.sampled_from(float_types))
 
@@ -330,6 +337,8 @@ def collections(
             metadata["hnsw:space"] = draw(st.sampled_from(["cosine", "l2", "ip"]))
 
     known_metadata_keys: Dict[str, Union[int, str, float]] = {}
+    known_metadata_strkeys: List[str] = []
+
     if add_filterable_data:
         while len(known_metadata_keys) < 5:
             key = draw(safe_text)
@@ -337,7 +346,11 @@ def collections(
 
     if has_documents is None:
         has_documents = draw(st.booleans())
+    if uses_metadata_like is None:
+        uses_metadata_like = draw(st.booleans())
     assert has_documents is not None
+    assert uses_metadata_like is not None
+
     # For cluster tests, we want to avoid generating documents and where_document
     # clauses of length < 3. We also don't want them to contain certan special
     # characters like _ and % that implicitly involve searching for a regex in sqlite.
@@ -348,11 +361,27 @@ def collections(
             )
         else:
             known_document_keywords = []
+
     else:
         if has_documents and add_filterable_data:
             known_document_keywords = draw(st.lists(safe_text, min_size=5, max_size=5))
         else:
             known_document_keywords = []
+
+    if uses_metadata_like and add_filterable_data:
+        known_str_list = draw(
+            st.lists(safe_text, min_size=like_fields_size, max_size=like_fields_size)
+        )
+        for i in range(0, like_fields_size):
+            key = draw(safe_text)
+            while key in known_metadata_keys or key in known_metadata_strkeys:
+                key = draw(safe_text)
+            known_metadata_strkeys.append(key)
+            # Add a default value
+            known_metadata_keys[key] = known_str_list[i]
+
+    else:
+        known_metadata_strkeys = []
 
     if not has_documents:
         has_embeddings = True
@@ -372,6 +401,8 @@ def collections(
         known_metadata_keys=known_metadata_keys,
         has_documents=has_documents,
         known_document_keywords=known_document_keywords,
+        known_metadata_strkeys=known_metadata_strkeys,
+        has_like_metadata=uses_metadata_like,
         has_embeddings=has_embeddings,
         embedding_function=embedding_function,
     )
@@ -399,9 +430,25 @@ def metadata(
                 del metadata[key]  # type: ignore
         # Finally, add in some of the known keys for the collection
         sampling_dict: Dict[str, st.SearchStrategy[Union[str, int, float]]] = {
-            k: st.just(v) for k, v in collection.known_metadata_keys.items()
+            k: st.just(v) for k, v in collection.known_metadata_keys.items()  # type: ignore[arg-type]
         }
+
         metadata.update(draw(st.fixed_dictionaries({}, optional=sampling_dict)))  # type: ignore
+
+        blacklist_categories = ("Cc", "Cs")
+        for k in collection.known_metadata_strkeys:
+            if collection.known_document_keywords:
+                known_words_st = st.sampled_from(collection.known_document_keywords)
+                random_words_st = st.text(
+                    min_size=1,
+                    alphabet=st.characters(blacklist_categories=blacklist_categories),
+                )
+                words = draw(
+                    st.lists(st.one_of(known_words_st, random_words_st), min_size=1)
+                )
+                mywords = " ".join(words)
+                metadata.update({k: mywords})  # type: ignore[attr-defined]
+
     # We don't allow submitting empty metadata
     if metadata == {}:
         return None
@@ -424,28 +471,29 @@ def document(draw: st.DrawFn, collection: Collection) -> types.Document:
         else:
             known_words_st = st.text(
                 min_size=3,
-                alphabet=st.characters(blacklist_categories=blacklist_categories),  # type: ignore
+                alphabet=st.characters(blacklist_categories=blacklist_categories),
             )
 
         random_words_st = st.text(
-            min_size=3, alphabet=st.characters(blacklist_categories=blacklist_categories)  # type: ignore
+            min_size=3,
+            alphabet=st.characters(blacklist_categories=blacklist_categories),
         )
         words = draw(st.lists(st.one_of(known_words_st, random_words_st), min_size=1))
         return " ".join(words)
 
     # Blacklist certain unicode characters that affect sqlite processing.
     # For example, the null (/x00) character makes sqlite stop processing a string.
-    blacklist_categories = ("Cc", "Cs")  # type: ignore
+    blacklist_categories = ("Cc", "Cs")  # type: ignore[assignment]
     if collection.known_document_keywords:
         known_words_st = st.sampled_from(collection.known_document_keywords)
     else:
         known_words_st = st.text(
             min_size=1,
-            alphabet=st.characters(blacklist_categories=blacklist_categories),  # type: ignore
+            alphabet=st.characters(blacklist_categories=blacklist_categories),
         )
 
     random_words_st = st.text(
-        min_size=1, alphabet=st.characters(blacklist_categories=blacklist_categories)  # type: ignore
+        min_size=1, alphabet=st.characters(blacklist_categories=blacklist_categories)
     )
     words = draw(st.lists(st.one_of(known_words_st, random_words_st), min_size=1))
     return " ".join(words)
@@ -552,6 +600,12 @@ def where_clause(draw: st.DrawFn, collection: Collection) -> types.Where:
     value = collection.known_metadata_keys[key]
 
     legal_ops: List[Optional[str]] = [None]
+    if collection.has_like_metadata:
+        if key in collection.known_metadata_strkeys and isinstance(value, str):
+            # For $like/nlike operands only
+            # working under the assumption that like/nlike isn't supported
+            # by the distributed system.
+            legal_ops = [None, "$eq", "$ne", "$like", "$nlike"]
 
     if isinstance(value, bool):
         legal_ops.extend(["$eq", "$ne", "$in", "$nin"])
@@ -582,6 +636,22 @@ def where_clause(draw: st.DrawFn, collection: Collection) -> types.Where:
         if isinstance(value, str) and not value:
             return {}
         return {key: {op: [draw(opposite_value(value)) for _ in range(3)]}}
+    elif op == "$like":
+        if isinstance(value, str) and not value:
+            return {}
+        if collection.known_document_keywords:
+            word = draw(st.sampled_from(collection.known_document_keywords))
+        else:
+            word = draw(safe_text)
+        return {key: {op: f"%{word}%"}}  # type: ignore
+    elif op == "$nlike":
+        if isinstance(value, str) and not value:
+            return {}
+        if collection.known_document_keywords:
+            word = draw(st.sampled_from(collection.known_document_keywords))
+        else:
+            word = draw(safe_text)
+        return {key: {op: f"%{word}%"}}  # type: ignore
     else:
         return {key: {op: value}}  # type: ignore
 

@@ -714,6 +714,12 @@ def _value_criterion(
             col = metadata_t.string_value
         if op in ("$eq", "$ne"):
             expr = col == p_val
+        elif op == "$like":
+            search_term = f"{cast(str, value)}"
+            expr = col.like(search_term)
+        elif op == "$nlike":
+            search_term = f"{cast(str, value)}"
+            expr = col.not_like(search_term)
         else:
             expr = col.isin(p_val)
 
