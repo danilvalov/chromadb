@@ -1,13 +1,22 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from chromadb.api.types import Embeddings, IDs
-from chromadb.types import RequestVersionContext, Where, WhereDocument, Collection
+from chromadb.api.types import Embeddings, IDs, Include
+from chromadb.types import (
+    Collection,
+    RequestVersionContext,
+    Segment,
+    Where,
+    WhereDocument,
+)
 
 
 @dataclass
 class Scan:
     collection: Collection
+    knn: Segment
+    metadata: Segment
+    record: Segment
 
     @property
     def version(self) -> RequestVersionContext:
@@ -43,3 +52,18 @@ class Projection:
     metadata: bool = False
     rank: bool = False
     uri: bool = False
+
+    @property
+    def included(self) -> Include:
+        includes = list()
+        if self.document:
+            includes.append("documents")
+        if self.embedding:
+            includes.append("embeddings")
+        if self.metadata:
+            includes.append("metadatas")
+        if self.rank:
+            includes.append("distances")
+        if self.uri:
+            includes.append("uris")
+        return includes

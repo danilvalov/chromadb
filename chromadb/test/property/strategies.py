@@ -158,7 +158,7 @@ def collection_name(draw: st.DrawFn) -> str:
     _ipv4_address_re = re.compile(r"^([0-9]{1,3}\.){3}[0-9]{1,3}$")
     _two_periods_re = re.compile(r"\.\.")
 
-    name: str = draw(st.from_regex(_collection_name_re))
+    name: str = draw(st.from_regex(_collection_name_re)).strip()
     hypothesis.assume(not _ipv4_address_re.match(name))
     hypothesis.assume(not _two_periods_re.search(name))
 
@@ -177,14 +177,17 @@ def create_embeddings(
     count: int,
     dtype: npt.DTypeLike,
 ) -> types.Embeddings:
-    embeddings: types.Embeddings = (
-        np.random.uniform(
-            low=-1.0,
-            high=1.0,
-            size=(count, dim),
-        )
-        .astype(dtype)
-        .tolist()
+    embeddings: types.Embeddings = cast(
+        types.Embeddings,
+        (
+            np.random.uniform(
+                low=-1.0,
+                high=1.0,
+                size=(count, dim),
+            )
+            .astype(dtype)
+            .tolist()
+        ),
     )
 
     return embeddings
@@ -426,7 +429,7 @@ def metadata(
                 del metadata[key]  # type: ignore
         # Finally, add in some of the known keys for the collection
         sampling_dict: Dict[str, st.SearchStrategy[Union[str, int, float]]] = {
-            k: st.just(v) for k, v in collection.known_metadata_keys.items()
+            k: st.just(v) for k, v in collection.known_metadata_keys.items()  # type: ignore[arg-type]
         }
 
         metadata.update(draw(st.fixed_dictionaries({}, optional=sampling_dict)))  # type: ignore
@@ -443,7 +446,7 @@ def metadata(
                     st.lists(st.one_of(known_words_st, random_words_st), min_size=1)
                 )
                 mywords = " ".join(words)
-                metadata.update({k: mywords})
+                metadata.update({k: mywords})  # type: ignore[attr-defined]
 
     # We don't allow submitting empty metadata
     if metadata == {}:
@@ -467,28 +470,29 @@ def document(draw: st.DrawFn, collection: Collection) -> types.Document:
         else:
             known_words_st = st.text(
                 min_size=3,
-                alphabet=st.characters(blacklist_categories=blacklist_categories),  # type: ignore
+                alphabet=st.characters(blacklist_categories=blacklist_categories),
             )
 
         random_words_st = st.text(
-            min_size=3, alphabet=st.characters(blacklist_categories=blacklist_categories)  # type: ignore
+            min_size=3,
+            alphabet=st.characters(blacklist_categories=blacklist_categories),
         )
         words = draw(st.lists(st.one_of(known_words_st, random_words_st), min_size=1))
         return " ".join(words)
 
     # Blacklist certain unicode characters that affect sqlite processing.
     # For example, the null (/x00) character makes sqlite stop processing a string.
-    blacklist_categories = ("Cc", "Cs")  # type: ignore
+    blacklist_categories = ("Cc", "Cs")  # type: ignore[assignment]
     if collection.known_document_keywords:
         known_words_st = st.sampled_from(collection.known_document_keywords)
     else:
         known_words_st = st.text(
             min_size=1,
-            alphabet=st.characters(blacklist_categories=blacklist_categories),  # type: ignore
+            alphabet=st.characters(blacklist_categories=blacklist_categories),
         )
 
     random_words_st = st.text(
-        min_size=1, alphabet=st.characters(blacklist_categories=blacklist_categories)  # type: ignore
+        min_size=1, alphabet=st.characters(blacklist_categories=blacklist_categories)
     )
     words = draw(st.lists(st.one_of(known_words_st, random_words_st), min_size=1))
     return " ".join(words)
@@ -572,9 +576,7 @@ def opposite_value(value: LiteralValue) -> SearchStrategy[Any]:
     Returns a strategy that will generate all valid values except the input value - testing of $nin
     """
     if isinstance(value, float):
-        return st.floats(allow_nan=False, allow_infinity=False).filter(
-            lambda x: x != value
-        )
+        return safe_floats.filter(lambda x: x != value)
     elif isinstance(value, str):
         return safe_text.filter(lambda x: x != value)
     elif isinstance(value, bool):
@@ -587,7 +589,6 @@ def opposite_value(value: LiteralValue) -> SearchStrategy[Any]:
         return st.from_type(type(value)).filter(lambda x: x != value)
 
 
-
 @st.composite
 def where_clause(draw: st.DrawFn, collection: Collection) -> types.Where:
     """Generate a filter that could be used in a query against the given collection"""
@@ -597,22 +598,25 @@ def where_clause(draw: st.DrawFn, collection: Collection) -> types.Where:
     key = draw(st.sampled_from(known_keys))
     value = collection.known_metadata_keys[key]
 
-
-    # This is hacky, but the distributed system does not support $in or $in so we
-    # need to avoid generating these operators for now in that case.
-    # TODO: Remove this once the distributed system supports $in and $nin
-    legal_ops: List[Optional[str]]
-    legal_ops = [None, "$eq", "$ne", "$in", "$nin"]
+    legal_ops: List[Optional[str]] = [None]
     if collection.has_like_metadata:
-      if key in collection.known_metadata_strkeys and isinstance(value, str):
-        # For $like/nlike operands only
-        # working under the assumption that like/nlike isn't supported
-        # by the distributed system.
-        legal_ops: List[Optional[str]] =[None, "$eq", "$ne", "$like", "$nlike"]
+        if key in collection.known_metadata_strkeys and isinstance(value, str):
+            # For $like/nlike operands only
+            # working under the assumption that like/nlike isn't supported
+            # by the distributed system.
+            legal_ops = [None, "$eq", "$ne", "$like", "$nlike"]
 
-
-    if not isinstance(value, str) and not isinstance(value, bool):
+    if isinstance(value, bool):
+        legal_ops.extend(["$eq", "$ne", "$in", "$nin"])
+    elif isinstance(value, float):
         legal_ops.extend(["$gt", "$lt", "$lte", "$gte"])
+    elif isinstance(value, int):
+        legal_ops.extend(["$gt", "$lt", "$lte", "$gte", "$eq", "$ne", "$in", "$nin"])
+    elif isinstance(value, str):
+        legal_ops.extend(["$eq", "$ne", "$in", "$nin"])
+    else:
+        assert False, f"Unsupported type: {type(value)}"
+
     if isinstance(value, float):
         # Add or subtract a small number to avoid floating point rounding errors
         value = value + draw(st.sampled_from([1e-6, -1e-6]))
@@ -638,7 +642,7 @@ def where_clause(draw: st.DrawFn, collection: Collection) -> types.Where:
             word = draw(st.sampled_from(collection.known_document_keywords))
         else:
             word = draw(safe_text)
-        return {key: {op: f"%{word}%"}}
+        return {key: {op: f"%{word}%"}}  # type: ignore[dict-item]
     elif op == "$nlike":
         if isinstance(value, str) and not value:
             return {}
@@ -646,7 +650,7 @@ def where_clause(draw: st.DrawFn, collection: Collection) -> types.Where:
             word = draw(st.sampled_from(collection.known_document_keywords))
         else:
             word = draw(safe_text)
-        return {key: {op: f"%{word}%"}}
+        return {key: {op: f"%{word}%"}}  # type: ignore[dict-item]
     else:
         return {key: {op: value}}  # type: ignore
 

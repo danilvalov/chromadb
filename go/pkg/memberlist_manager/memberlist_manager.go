@@ -2,7 +2,7 @@ package memberlist_manager
 
 import (
 	"context"
-	"errors"
+	"sort"
 	"time"
 
 	"github.com/chroma-core/chroma/go/pkg/common"
@@ -129,16 +129,23 @@ func memberlistSame(oldMemberlist Memberlist, newMemberlist Memberlist) bool {
 	if len(oldMemberlist) != len(newMemberlist) {
 		return false
 	}
-	// use a map to check if the new memberlist contains all the old members
-	newMemberlistMap := make(map[string]bool)
-	for _, member := range newMemberlist {
-		newMemberlistMap[member.id] = true
-	}
-	for _, member := range oldMemberlist {
-		if _, ok := newMemberlistMap[member.id]; !ok {
+
+	// make a copy of the slices to avoid modifying the original
+	oldMemberlistClone := make(Memberlist, len(oldMemberlist))
+	newMemberlistClone := make(Memberlist, len(newMemberlist))
+	copy(oldMemberlistClone, oldMemberlist)
+	copy(newMemberlistClone, newMemberlist)
+
+	// sort the slices to ensure that the order of the elements does not matter
+	sort.Sort(oldMemberlistClone)
+	sort.Sort(newMemberlistClone)
+
+	for i := range oldMemberlistClone {
+		if oldMemberlistClone[i] != newMemberlistClone[i] {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -147,14 +154,12 @@ func (m *MemberlistManager) getOldMemberlist() (Memberlist, *string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if memberlist == nil {
-		return nil, nil, errors.New("Memberlist recieved is nil")
-	}
-	return *memberlist, &resourceVersion, nil
+
+	return memberlist, &resourceVersion, nil
 }
 
 func (m *MemberlistManager) updateMemberlist(memberlist Memberlist, resourceVersion string) error {
-	return m.memberlistStore.UpdateMemberlist(context.Background(), &memberlist, resourceVersion)
+	return m.memberlistStore.UpdateMemberlist(context.Background(), memberlist, resourceVersion)
 }
 
 func (m *MemberlistManager) SetReconcileInterval(interval time.Duration) {

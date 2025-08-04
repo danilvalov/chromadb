@@ -1,15 +1,16 @@
 use super::{CollectionUuid, ConversionError};
-use crate::chroma_proto::{
-    FilePaths, FlushCollectionCompactionResponse, FlushSegmentCompactionInfo,
+use crate::{
+    chroma_proto::{FilePaths, FlushCollectionCompactionResponse, FlushSegmentCompactionInfo},
+    SegmentUuid,
 };
 use chroma_error::{ChromaError, ErrorCodes};
 use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SegmentFlushInfo {
-    pub segment_id: Uuid,
+    pub segment_id: SegmentUuid,
     pub file_paths: HashMap<String, Vec<String>>,
 }
 

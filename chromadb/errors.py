@@ -27,13 +27,6 @@ class InvalidDimensionException(ChromaError):
         return "InvalidDimension"
 
 
-class InvalidCollectionException(ChromaError):
-    @classmethod
-    @overrides
-    def name(cls) -> str:
-        return "InvalidCollection"
-
-
 class IDAlreadyExistsError(ChromaError):
     @overrides
     def code(self) -> int:
@@ -172,7 +165,7 @@ class RateLimitError(ChromaError):
 class QuotaError(ChromaError):
     @overrides
     def code(self) -> int:
-        return 429
+        return 400
 
     @classmethod
     @overrides
@@ -183,7 +176,6 @@ class QuotaError(ChromaError):
 error_types: Dict[str, Type[ChromaError]] = {
     "InvalidDimension": InvalidDimensionException,
     "InvalidArgumentError": InvalidArgumentError,
-    "InvalidCollection": InvalidCollectionException,
     "IDAlreadyExists": IDAlreadyExistsError,
     "DuplicateID": DuplicateIDError,
     "InvalidUUID": InvalidUUIDError,
@@ -194,4 +186,9 @@ error_types: Dict[str, Type[ChromaError]] = {
     "VersionMismatchError": VersionMismatchError,
     "RateLimitError": RateLimitError,
     "AuthError": ChromaAuthError,
+    "UniqueConstraintError": UniqueConstraintError,
+    "QuotaError": QuotaError,
+    "InternalError": InternalError,
+    # Catch-all for any other errors
+    "ChromaError": ChromaError,
 }

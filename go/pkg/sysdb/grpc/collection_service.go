@@ -48,8 +48,18 @@ func (s *Server) ResetState(context.Context, *emptypb.Empty) (*coordinatorpb.Res
 
 // The fact that we ignore the metadata of the generated collections is a
 // bit weird, but it is the easiest way to excercise all cases
+
+// NOTE: In current implementation, we do not support updating the metadata of an existing collection via this RPC.
+//
+// The call will fail if the collection already exists. Leaving the comments about cases 0,1,2,3 above for future reference.
+// Refer to these issues for more context:
+// https://github.com/chroma-core/chroma/issues/2390
+// https://github.com/chroma-core/chroma/pull/2810
 func (s *Server) CreateCollection(ctx context.Context, req *coordinatorpb.CreateCollectionRequest) (*coordinatorpb.CreateCollectionResponse, error) {
 	res := &coordinatorpb.CreateCollectionResponse{}
+
+	log.Info("CreateCollectionRequest", zap.Any("request", req))
+
 	createCollection, err := convertToCreateCollectionModel(req)
 	if err != nil {
 		log.Error("CreateCollection failed. error converting to create collection model", zap.Error(err), zap.String("collection_id", req.Id), zap.String("collection_name", req.Name))
@@ -65,7 +75,32 @@ func (s *Server) CreateCollection(ctx context.Context, req *coordinatorpb.Create
 		res.Created = false
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
-	collection, created, err := s.coordinator.CreateCollection(ctx, createCollection)
+
+	// Convert the request segments to create segment models
+	createSegments := []*model.Segment{}
+	for _, segment := range req.Segments {
+		createSegment, err := convertProtoSegment(segment)
+		if err != nil {
+			log.Error("Error in creating segments for the collection", zap.Error(err))
+			res.Collection = nil // We don't need to set the collection in case of error
+			res.Created = false
+			if err == common.ErrSegmentUniqueConstraintViolation {
+				log.Error("segment id already exist", zap.Error(err))
+				return res, grpcutils.BuildAlreadyExistsGrpcError(err.Error())
+			}
+			return res, grpcutils.BuildInternalGrpcError(err.Error())
+		}
+		filePaths := make(map[string][]string)
+		for key, filePath := range segment.FilePaths {
+			filePaths[key] = filePath.Paths
+		}
+		createSegment.FilePaths = filePaths
+
+		createSegments = append(createSegments, createSegment)
+	}
+
+	// Create the collection and segments
+	collection, created, err := s.coordinator.CreateCollectionAndSegments(ctx, createCollection, createSegments)
 	if err != nil {
 		log.Error("CreateCollection failed. error creating collection", zap.Error(err), zap.String("collection_id", req.Id), zap.String("collection_name", req.Name))
 		res.Collection = &coordinatorpb.Collection{
@@ -81,11 +116,44 @@ func (s *Server) CreateCollection(ctx context.Context, req *coordinatorpb.Create
 		if err == common.ErrCollectionUniqueConstraintViolation {
 			return res, grpcutils.BuildAlreadyExistsGrpcError(err.Error())
 		}
+		if err == common.ErrDatabaseNotFound {
+			return res, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		if err == common.ErrConcurrentDeleteCollection {
+			return res, grpcutils.BuildAbortedGrpcError(err.Error())
+		}
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
 	res.Collection = convertCollectionToProto(collection)
 	res.Created = created
 	log.Info("CreateCollection finished.", zap.String("collection_id", req.Id), zap.String("collection_name", req.Name), zap.Bool("created", created))
+	return res, nil
+}
+
+func (s *Server) GetCollection(ctx context.Context, req *coordinatorpb.GetCollectionRequest) (*coordinatorpb.GetCollectionResponse, error) {
+	collectionID := req.Id
+	tenantID := req.Tenant
+	databaseName := req.Database
+
+	res := &coordinatorpb.GetCollectionResponse{}
+
+	parsedCollectionID, err := types.ToUniqueID(&collectionID)
+	if err != nil {
+		log.Error("GetCollection failed. collection id format error", zap.Error(err), zap.Stringp("collection_id", &collectionID), zap.Stringp("collection_name", req.Name))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	collection, err := s.coordinator.GetCollection(ctx, parsedCollectionID, req.Name, *tenantID, *databaseName)
+	if err != nil {
+		if err == common.ErrCollectionSoftDeleted {
+			return res, grpcutils.BuildFailedPreconditionGrpcError(err.Error())
+		}
+
+		log.Error("GetCollection failed. ", zap.Error(err), zap.Stringp("collection_id", &collectionID), zap.Stringp("collection_name", req.Name))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	res.Collection = convertCollectionToProto(collection)
 	return res, nil
 }
 
@@ -99,13 +167,39 @@ func (s *Server) GetCollections(ctx context.Context, req *coordinatorpb.GetColle
 
 	res := &coordinatorpb.GetCollectionsResponse{}
 
+	collectionIDs := ([]types.UniqueID)(nil)
 	parsedCollectionID, err := types.ToUniqueID(collectionID)
 	if err != nil {
 		log.Error("GetCollections failed. collection id format error", zap.Error(err), zap.Stringp("collection_id", collectionID), zap.Stringp("collection_name", collectionName))
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
+	if parsedCollectionID != types.NilUniqueID() {
+		collectionIDs = []types.UniqueID{parsedCollectionID}
+	}
 
-	collections, err := s.coordinator.GetCollections(ctx, parsedCollectionID, collectionName, tenantID, databaseName, limit, offset)
+	if req.IdsFilter != nil {
+		if collectionIDs == nil {
+			collectionIDs = make([]types.UniqueID, 0, len(req.IdsFilter.Ids))
+		}
+
+		for _, id := range req.IdsFilter.Ids {
+			parsedCollectionID, err := types.ToUniqueID(&id)
+			if err != nil {
+				log.Error("GetCollections failed. collection id format error", zap.Error(err), zap.Stringp("collection_id", &id), zap.Stringp("collection_name", collectionName))
+				return res, grpcutils.BuildInternalGrpcError(err.Error())
+			}
+			if parsedCollectionID != types.NilUniqueID() {
+				collectionIDs = append(collectionIDs, parsedCollectionID)
+			}
+		}
+	}
+
+	includeSoftDeleted := false
+	if req.IncludeSoftDeleted != nil {
+		includeSoftDeleted = *req.IncludeSoftDeleted
+	}
+
+	collections, err := s.coordinator.GetCollections(ctx, collectionIDs, collectionName, tenantID, databaseName, limit, offset, includeSoftDeleted)
 	if err != nil {
 		log.Error("GetCollections failed. ", zap.Error(err), zap.Stringp("collection_id", collectionID), zap.Stringp("collection_name", collectionName))
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
@@ -115,7 +209,109 @@ func (s *Server) GetCollections(ctx context.Context, req *coordinatorpb.GetColle
 		collectionpb := convertCollectionToProto(collection)
 		res.Collections = append(res.Collections, collectionpb)
 	}
-	log.Info("GetCollections succeeded", zap.Any("response", res.Collections), zap.Stringp("collection_id", collectionID), zap.Stringp("collection_name", collectionName))
+	return res, nil
+}
+
+func (s *Server) GetCollectionByResourceName(ctx context.Context, req *coordinatorpb.GetCollectionByResourceNameRequest) (*coordinatorpb.GetCollectionResponse, error) {
+	tenantResourceName := req.TenantResourceName
+	databaseName := req.Database
+	collectionName := req.Name
+
+	res := &coordinatorpb.GetCollectionResponse{}
+
+	collection, err := s.coordinator.GetCollectionByResourceName(ctx, tenantResourceName, databaseName, collectionName)
+	if err != nil {
+		log.Error("GetCollectionByResourceName failed. ", zap.Error(err), zap.String("tenant_resource_name", tenantResourceName), zap.String("database_name", databaseName), zap.String("collection_name", collectionName))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	res.Collection = convertCollectionToProto(collection)
+	return res, nil
+}
+
+func (s *Server) CountCollections(ctx context.Context, req *coordinatorpb.CountCollectionsRequest) (*coordinatorpb.CountCollectionsResponse, error) {
+	res := &coordinatorpb.CountCollectionsResponse{}
+	collection_count, err := s.coordinator.CountCollections(ctx, req.Tenant, req.Database)
+	if err != nil {
+		log.Error("CountCollections failed. ", zap.Error(err), zap.String("tenant", req.Tenant), zap.Stringp("database", req.Database))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	res.Count = collection_count
+	return res, nil
+}
+
+func (s *Server) GetCollectionSize(ctx context.Context, req *coordinatorpb.GetCollectionSizeRequest) (*coordinatorpb.GetCollectionSizeResponse, error) {
+	collectionID := req.Id
+
+	res := &coordinatorpb.GetCollectionSizeResponse{}
+
+	parsedCollectionID, err := types.ToUniqueID(&collectionID)
+	if err != nil {
+		log.Error("GetCollectionSize failed. collection id format error", zap.Error(err), zap.Stringp("collection_id", &collectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	total_records_post_compaction, err := s.coordinator.GetCollectionSize(ctx, parsedCollectionID)
+	if err != nil {
+		log.Error("GetCollectionSize failed. ", zap.Error(err), zap.Stringp("collection_id", &collectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	res.TotalRecordsPostCompaction = total_records_post_compaction
+	return res, nil
+}
+
+func (s *Server) CheckCollections(ctx context.Context, req *coordinatorpb.CheckCollectionsRequest) (*coordinatorpb.CheckCollectionsResponse, error) {
+	res := &coordinatorpb.CheckCollectionsResponse{}
+	res.Deleted = make([]bool, len(req.CollectionIds))
+	res.LogPosition = make([]int64, len(req.CollectionIds))
+
+	for i, collectionID := range req.CollectionIds {
+		parsedId, err := types.ToUniqueID(&collectionID)
+		if err != nil {
+			log.Error("CheckCollection failed. collection id format error", zap.Error(err), zap.String("collection_id", collectionID))
+			return nil, grpcutils.BuildInternalGrpcError(err.Error())
+		}
+		deleted, logPosition, err := s.coordinator.CheckCollection(ctx, parsedId)
+
+		if err != nil {
+			log.Error("CheckCollection failed", zap.Error(err), zap.String("collection_id", collectionID))
+			return nil, grpcutils.BuildInternalGrpcError(err.Error())
+		}
+
+		res.Deleted[i] = deleted
+		res.LogPosition[i] = logPosition
+	}
+	return res, nil
+}
+
+func (s *Server) GetCollectionWithSegments(ctx context.Context, req *coordinatorpb.GetCollectionWithSegmentsRequest) (*coordinatorpb.GetCollectionWithSegmentsResponse, error) {
+	collectionID := req.Id
+
+	res := &coordinatorpb.GetCollectionWithSegmentsResponse{}
+
+	parsedCollectionID, err := types.ToUniqueID(&collectionID)
+	if err != nil {
+		log.Error("GetCollectionWithSegments failed. collection id format error", zap.Error(err), zap.String("collection_id", collectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	collection, segments, err := s.coordinator.GetCollectionWithSegments(ctx, parsedCollectionID)
+	if err != nil {
+		log.Error("GetCollectionWithSegments failed. ", zap.Error(err), zap.String("collection_id", collectionID))
+		if err == common.ErrCollectionNotFound || err == common.ErrCollectionSoftDeleted {
+			return res, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	res.Collection = convertCollectionToProto(collection)
+
+	segmentpbList := make([]*coordinatorpb.Segment, 0, len(segments))
+	for _, segment := range segments {
+		segmentpb := convertSegmentToProto(segment)
+		segmentpbList = append(segmentpbList, segmentpb)
+	}
+	res.Segments = segmentpbList
+
 	return res, nil
 }
 
@@ -132,7 +328,7 @@ func (s *Server) DeleteCollection(ctx context.Context, req *coordinatorpb.Delete
 		TenantID:     req.GetTenant(),
 		DatabaseName: req.GetDatabase(),
 	}
-	err = s.coordinator.DeleteCollection(ctx, deleteCollection)
+	err = s.coordinator.SoftDeleteCollection(ctx, deleteCollection)
 	if err != nil {
 		log.Error("DeleteCollection failed", zap.Error(err), zap.String("collection_id", collectionID))
 		if err == common.ErrCollectionDeleteNonExistingCollection {
@@ -141,6 +337,31 @@ func (s *Server) DeleteCollection(ctx context.Context, req *coordinatorpb.Delete
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
 	log.Info("DeleteCollection succeeded", zap.String("collection_id", collectionID))
+	return res, nil
+}
+
+func (s *Server) FinishCollectionDeletion(ctx context.Context, req *coordinatorpb.FinishCollectionDeletionRequest) (*coordinatorpb.FinishCollectionDeletionResponse, error) {
+	res := &coordinatorpb.FinishCollectionDeletionResponse{}
+	collectionID := req.GetId()
+	parsedCollectionID, err := types.ToUniqueID(&collectionID)
+	if err != nil {
+		log.Error("FinishCollectionDeletion failed", zap.Error(err), zap.String("collection_id", collectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	deleteCollection := &model.DeleteCollection{
+		ID:           parsedCollectionID,
+		TenantID:     req.GetTenant(),
+		DatabaseName: req.GetDatabase(),
+	}
+	err = s.coordinator.FinishCollectionDeletion(ctx, deleteCollection)
+	if err != nil {
+		log.Error("FinishCollectionDeletion failed", zap.Error(err), zap.String("collection_id", collectionID))
+		if err == common.ErrCollectionNotFound {
+			return res, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	log.Info("FinishCollectionDeletion succeeded", zap.String("collection_id", collectionID))
 	return res, nil
 }
 
@@ -155,9 +376,10 @@ func (s *Server) UpdateCollection(ctx context.Context, req *coordinatorpb.Update
 	}
 
 	updateCollection := &model.UpdateCollection{
-		ID:        parsedCollectionID,
-		Name:      req.Name,
-		Dimension: req.Dimension,
+		ID:                      parsedCollectionID,
+		Name:                    req.Name,
+		Dimension:               req.Dimension,
+		NewConfigurationJsonStr: req.ConfigurationJsonStr,
 	}
 
 	resetMetadata := req.GetResetMetadata()
@@ -197,8 +419,98 @@ func (s *Server) UpdateCollection(ctx context.Context, req *coordinatorpb.Update
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
 
-	log.Info("UpdateCollection succeeded", zap.String("collection_id", collectionID))
 	return res, nil
+}
+
+func (s *Server) ForkCollection(ctx context.Context, req *coordinatorpb.ForkCollectionRequest) (*coordinatorpb.ForkCollectionResponse, error) {
+	res := &coordinatorpb.ForkCollectionResponse{}
+
+	sourceCollectionID := req.SourceCollectionId
+	parsedSourceCollectionID, err := types.ToUniqueID(&sourceCollectionID)
+	if err != nil {
+		log.Error("ForkCollection failed. Failed to parse source collection id", zap.Error(err), zap.String("collection_id", sourceCollectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	targetCollectionID := req.TargetCollectionId
+	parsedTargetCollectionID, err := types.ToUniqueID(&targetCollectionID)
+	if err != nil {
+		log.Error("ForkCollection failed. Failed to parse target collection id", zap.Error(err), zap.String("collection_id", targetCollectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	forkCollection := &model.ForkCollection{
+		SourceCollectionID:                   parsedSourceCollectionID,
+		SourceCollectionLogCompactionOffset:  req.SourceCollectionLogCompactionOffset,
+		SourceCollectionLogEnumerationOffset: req.SourceCollectionLogEnumerationOffset,
+		TargetCollectionID:                   parsedTargetCollectionID,
+		TargetCollectionName:                 req.TargetCollectionName,
+	}
+	collection, segments, err := s.coordinator.ForkCollection(ctx, forkCollection)
+	if err != nil {
+		log.Error("ForkCollection failed. ", zap.Error(err), zap.String("collection_id", sourceCollectionID))
+		if err == common.ErrCollectionNotFound || err == common.ErrCollectionSoftDeleted {
+			return res, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		if err == common.ErrCollectionLogPositionStale {
+			return res, grpcutils.BuildFailedPreconditionGrpcError(err.Error())
+		}
+		if err == common.ErrCollectionUniqueConstraintViolation {
+			return res, grpcutils.BuildAlreadyExistsGrpcError(err.Error())
+		}
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	res.Collection = convertCollectionToProto(collection)
+
+	segmentpbList := make([]*coordinatorpb.Segment, 0, len(segments))
+	for _, segment := range segments {
+		segmentpb := convertSegmentToProto(segment)
+		segmentpbList = append(segmentpbList, segmentpb)
+	}
+	res.Segments = segmentpbList
+
+	return res, nil
+}
+
+func (s *Server) CountForks(ctx context.Context, req *coordinatorpb.CountForksRequest) (*coordinatorpb.CountForksResponse, error) {
+	res := &coordinatorpb.CountForksResponse{}
+
+	sourceCollectionID := req.SourceCollectionId
+	parsedSourceCollectionID, err := types.ToUniqueID(&sourceCollectionID)
+	if err != nil {
+		log.Error("CountForks failed. Failed to parse source collection id", zap.Error(err), zap.String("collection_id", sourceCollectionID))
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	count, err := s.coordinator.CountForks(ctx, parsedSourceCollectionID)
+	if err != nil {
+		if err == common.ErrCollectionNotFound {
+			return res, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	res.Count = count
+	return res, nil
+}
+
+func (s *Server) ListCollectionVersions(ctx context.Context, req *coordinatorpb.ListCollectionVersionsRequest) (*coordinatorpb.ListCollectionVersionsResponse, error) {
+	collectionID, err := types.ToUniqueID(&req.CollectionId)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+
+	markedForDeletion := false
+	if req.IncludeMarkedForDeletion != nil {
+		markedForDeletion = *req.IncludeMarkedForDeletion
+	}
+
+	versions, err := s.coordinator.ListCollectionVersions(ctx, collectionID, req.TenantId, req.MaxCount, req.VersionsBefore, req.VersionsAtOrAfter, markedForDeletion)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	return &coordinatorpb.ListCollectionVersionsResponse{
+		Versions: versions,
+	}, nil
 }
 
 func (s *Server) FlushCollectionCompaction(ctx context.Context, req *coordinatorpb.FlushCollectionCompactionRequest) (*coordinatorpb.FlushCollectionCompactionResponse, error) {
@@ -231,15 +543,20 @@ func (s *Server) FlushCollectionCompaction(ctx context.Context, req *coordinator
 		})
 	}
 	FlushCollectionCompaction := &model.FlushCollectionCompaction{
-		ID:                       collectionID,
-		TenantID:                 req.TenantId,
-		LogPosition:              req.LogPosition,
-		CurrentCollectionVersion: req.CollectionVersion,
-		FlushSegmentCompactions:  segmentCompactionInfo,
+		ID:                         collectionID,
+		TenantID:                   req.TenantId,
+		LogPosition:                req.LogPosition,
+		CurrentCollectionVersion:   req.CollectionVersion,
+		FlushSegmentCompactions:    segmentCompactionInfo,
+		TotalRecordsPostCompaction: req.TotalRecordsPostCompaction,
+		SizeBytesPostCompaction:    req.SizeBytesPostCompaction,
 	}
 	flushCollectionInfo, err := s.coordinator.FlushCollectionCompaction(ctx, FlushCollectionCompaction)
 	if err != nil {
 		log.Error("FlushCollectionCompaction failed", zap.Error(err), zap.String("collection_id", req.CollectionId), zap.Int32("collection_version", req.CollectionVersion), zap.Int64("log_position", req.LogPosition))
+		if err == common.ErrCollectionSoftDeleted {
+			return nil, grpcutils.BuildFailedPreconditionGrpcError(err.Error())
+		}
 		return nil, grpcutils.BuildInternalGrpcError(err.Error())
 	}
 	res := &coordinatorpb.FlushCollectionCompactionResponse{
@@ -247,6 +564,73 @@ func (s *Server) FlushCollectionCompaction(ctx context.Context, req *coordinator
 		CollectionVersion:  flushCollectionInfo.CollectionVersion,
 		LastCompactionTime: flushCollectionInfo.TenantLastCompactionTime,
 	}
-	log.Info("FlushCollectionCompaction succeeded", zap.String("collection_id", req.CollectionId), zap.Int32("collection_version", req.CollectionVersion), zap.Int64("log_position", req.LogPosition))
+	return res, nil
+}
+
+func (s *Server) ListCollectionsToGc(ctx context.Context, req *coordinatorpb.ListCollectionsToGcRequest) (*coordinatorpb.ListCollectionsToGcResponse, error) {
+	absoluteCutoffTimeSecs := (*uint64)(nil)
+	if req.CutoffTime != nil {
+		cutoffTime := uint64(req.CutoffTime.Seconds)
+		absoluteCutoffTimeSecs = &cutoffTime
+	}
+
+	collectionsToGc, err := s.coordinator.ListCollectionsToGc(ctx, absoluteCutoffTimeSecs, req.Limit, req.TenantId, req.MinVersionsIfAlive)
+	if err != nil {
+		log.Error("ListCollectionsToGc failed", zap.Error(err))
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	res := &coordinatorpb.ListCollectionsToGcResponse{}
+	for _, collectionToGc := range collectionsToGc {
+		res.Collections = append(res.Collections, &coordinatorpb.CollectionToGcInfo{
+			Id:              collectionToGc.ID.String(),
+			Name:            collectionToGc.Name,
+			VersionFilePath: collectionToGc.VersionFilePath,
+			TenantId:        collectionToGc.TenantID,
+			LineageFilePath: collectionToGc.LineageFilePath,
+		})
+	}
+	return res, nil
+}
+
+// Mark the versions for deletion.
+// GC minics a 2PC protocol.
+// 1. Mark the versions for deletion by calling MarkVersionForDeletion.
+// 2. Compute the diffs and delete the files from S3.
+// 3. Delete the versions from the version file by calling DeleteCollectionVersion.
+//
+// NOTE about concurrency:
+// This method updates the version file which can concurrently with FlushCollectionCompaction.
+func (s *Server) MarkVersionForDeletion(ctx context.Context, req *coordinatorpb.MarkVersionForDeletionRequest) (*coordinatorpb.MarkVersionForDeletionResponse, error) {
+	res, err := s.coordinator.MarkVersionForDeletion(ctx, req)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	return res, nil
+}
+
+// Delete the versions from the version file. Refer to comments in MarkVersionForDeletion.
+// NOTE about concurrency:
+// This method updates the version file which can concurrently with FlushCollectionCompaction.
+func (s *Server) DeleteCollectionVersion(ctx context.Context, req *coordinatorpb.DeleteCollectionVersionRequest) (*coordinatorpb.DeleteCollectionVersionResponse, error) {
+	res, err := s.coordinator.DeleteCollectionVersion(ctx, req)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	return res, nil
+}
+
+func (s *Server) BatchGetCollectionVersionFilePaths(ctx context.Context, req *coordinatorpb.BatchGetCollectionVersionFilePathsRequest) (*coordinatorpb.BatchGetCollectionVersionFilePathsResponse, error) {
+	res, err := s.coordinator.BatchGetCollectionVersionFilePaths(ctx, req)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	return res, nil
+}
+
+func (s *Server) BatchGetCollectionSoftDeleteStatus(ctx context.Context, req *coordinatorpb.BatchGetCollectionSoftDeleteStatusRequest) (*coordinatorpb.BatchGetCollectionSoftDeleteStatusResponse, error) {
+	res, err := s.coordinator.BatchGetCollectionSoftDeleteStatus(ctx, req)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
 	return res, nil
 }

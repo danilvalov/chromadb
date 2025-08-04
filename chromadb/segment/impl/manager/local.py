@@ -93,6 +93,7 @@ class LocalSegmentManager(SegmentManager):
                 self._max_file_handles = ctypes.windll.msvcrt._getmaxstdio()  # type: ignore
             segment_limit = (
                 self._max_file_handles
+                # This is integer division in Python 3, and not a comment.
                 // PersistentLocalHnswSegment.get_file_handle_count()
             )
             self._vector_instances_file_handle_cache = LRUCache(
@@ -132,11 +133,13 @@ class LocalSegmentManager(SegmentManager):
         super().reset_state()
 
     @trace_method(
-        "LocalSegmentManager.create_segments",
+        "LocalSegmentManager.prepare_segments_for_new_collection",
         OpenTelemetryGranularity.OPERATION_AND_SEGMENT,
     )
     @override
-    def create_segments(self, collection: Collection) -> Sequence[Segment]:
+    def prepare_segments_for_new_collection(
+        self, collection: Collection
+    ) -> Sequence[Segment]:
         vector_segment = _segment(
             self._vector_segment_type, SegmentScope.VECTOR, collection
         )
@@ -262,4 +265,5 @@ def _segment(type: SegmentType, scope: SegmentScope, collection: Collection) -> 
         scope=scope,
         collection=collection.id,
         metadata=metadata,
+        file_paths={},
     )

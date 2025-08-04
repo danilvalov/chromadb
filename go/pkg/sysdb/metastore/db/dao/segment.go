@@ -182,7 +182,6 @@ func (s *segmentDb) GetSegments(id types.UniqueID, segmentType *string, scope *s
 		metadata = append(metadata, segmentMetadata)
 		currentSegment.SegmentMetadata = metadata
 	}
-	log.Info("get segments success", zap.Any("segments", segments))
 	return segments, nil
 }
 
@@ -212,7 +211,6 @@ func (s *segmentDb) Update(in *dbmodel.UpdateSegment) error {
 }
 
 func (s *segmentDb) RegisterFilePaths(flushSegmentCompactions []*model.FlushSegmentCompaction) error {
-	log.Info("register file paths", zap.Any("flushSegmentCompactions", flushSegmentCompactions))
 	for _, flushSegmentCompaction := range flushSegmentCompactions {
 		filePaths, err := json.Marshal(flushSegmentCompaction.FilePaths)
 		if err != nil {
@@ -228,4 +226,13 @@ func (s *segmentDb) RegisterFilePaths(flushSegmentCompactions []*model.FlushSegm
 		}
 	}
 	return nil
+}
+
+func (s *segmentDb) GetSegmentsByCollectionID(collectionID string) ([]*dbmodel.Segment, error) {
+	var segments []*dbmodel.Segment
+	err := s.db.Where("collection_id = ?", collectionID).Find(&segments).Error
+	if err != nil {
+		return nil, err
+	}
+	return segments, nil
 }

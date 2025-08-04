@@ -68,7 +68,6 @@ func (s *tenantDb) Insert(tenant *dbmodel.Tenant) error {
 }
 
 func (s *tenantDb) UpdateTenantLastCompactionTime(tenantID string, lastCompactionTime int64) error {
-	log.Info("UpdateTenantLastCompactionTime", zap.String("tenantID", tenantID), zap.Int64("lastCompactionTime", lastCompactionTime))
 	var tenants []dbmodel.Tenant
 	result := s.db.Model(&tenants).
 		Clauses(clause.Returning{Columns: []clause.Column{{Name: "id"}}}).
@@ -86,7 +85,6 @@ func (s *tenantDb) UpdateTenantLastCompactionTime(tenantID string, lastCompactio
 }
 
 func (s *tenantDb) GetTenantsLastCompactionTime(tenantIDs []string) ([]*dbmodel.Tenant, error) {
-	log.Info("GetTenantsLastCompactionTime", zap.Any("tenantIDs", tenantIDs))
 	var tenants []*dbmodel.Tenant
 
 	result := s.db.Select("id", "last_compaction_time").Find(&tenants, "id IN ?", tenantIDs)
@@ -96,4 +94,28 @@ func (s *tenantDb) GetTenantsLastCompactionTime(tenantIDs []string) ([]*dbmodel.
 	}
 
 	return tenants, nil
+}
+
+func (s *tenantDb) SetTenantResourceName(tenantID string, resourceName string) error {
+	var tenants []dbmodel.Tenant
+	result := s.db.Model(&tenants).
+		Clauses(clause.Returning{Columns: []clause.Column{{Name: "id"}}}).
+		Where("id = ? AND resource_name IS NULL", tenantID).
+		Update("resource_name", resourceName)
+
+	if result.Error != nil {
+		log.Error("SetTenantResourceName error", zap.Error(result.Error))
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		var count int64
+		if err := s.db.Model(&dbmodel.Tenant{}).Where("id = ?", tenantID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return common.ErrTenantNotFound
+		}
+		return common.ErrTenantResourceNameAlreadySet
+	}
+	return nil
 }

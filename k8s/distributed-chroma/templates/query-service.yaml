@@ -37,7 +37,7 @@ metadata:
   namespace: {{ .Values.namespace }}
 spec:
   serviceName: query-service
-  replicas: 2
+  replicas: {{ .Values.queryService.replicaCount }}
   selector:
     matchLabels:
       app: query-service
@@ -64,6 +64,10 @@ spec:
         - name: query-service
           image: "{{ .Values.queryService.image.repository }}:{{ .Values.queryService.image.tag }}"
           imagePullPolicy: IfNotPresent
+          readinessProbe:
+            grpc:
+              port: 50051
+              service: chroma.QueryExecutor
           volumeMounts:
             {{if .Values.queryService.configuration}}
             - name: query-service-config
@@ -75,6 +79,9 @@ spec:
             {{ end }}
           ports:
             - containerPort: 50051
+            - containerPort: 6060
+              protocol: TCP
+              name: pprof
           env:
             {{if .Values.queryService.configuration}}
             - name: CONFIG_PATH
@@ -85,10 +92,23 @@ spec:
               # TODO properly use flow control here to check which type of value we need.
 {{ .value | nindent 14 }}
             {{ end }}
+            {{ if .Values.queryService.jemallocConfig }}
+            - name: _RJEM_MALLOC_CONF
+              value: {{ .Values.queryService.jemallocConfig }}
+            {{ end }}
             - name: CHROMA_QUERY_SERVICE__MY_MEMBER_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+          {{ if .Values.queryService.resources }}
+          resources:
+            limits:
+              cpu: {{ .Values.queryService.resources.limits.cpu }}
+              memory: {{ .Values.queryService.resources.limits.memory }}
+            requests:
+              cpu: {{ .Values.queryService.resources.requests.cpu }}
+              memory: {{ .Values.queryService.resources.requests.memory }}
+          {{ end }}
       {{if .Values.queryService.tolerations}}
       tolerations:
         {{ toYaml .Values.queryService.tolerations | nindent 8 }}
@@ -97,10 +117,6 @@ spec:
       nodeSelector:
         {{ toYaml .Values.queryService.nodeSelector | nindent 8 }}
       {{ end }}
-      updateStrategy:
-        type: RollingUpdate
-        rollingUpdate:
-          partition: 0
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: "kubernetes.io/hostname"

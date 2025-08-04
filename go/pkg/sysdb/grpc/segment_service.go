@@ -17,7 +17,7 @@ func (s *Server) CreateSegment(ctx context.Context, req *coordinatorpb.CreateSeg
 
 	res := &coordinatorpb.CreateSegmentResponse{}
 
-	segment, err := convertSegmentToModel(segmentpb)
+	segment, err := convertProtoSegment(segmentpb)
 	if err != nil {
 		log.Error("CreateSegment failed. convert segment to model error", zap.Error(err), zap.String("request", segmentpb.String()))
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
@@ -72,7 +72,6 @@ func (s *Server) GetSegments(ctx context.Context, req *coordinatorpb.GetSegments
 		segmentpbList = append(segmentpbList, segmentpb)
 	}
 	res.Segments = segmentpbList
-	log.Info("GetSegments success", zap.String("request", req.String()), zap.String("response", res.String()))
 	return res, nil
 }
 
@@ -131,6 +130,5 @@ func (s *Server) UpdateSegment(ctx context.Context, req *coordinatorpb.UpdateSeg
 		log.Error("UpdateSegment failed", zap.Error(err), zap.String("request", req.String()))
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
-	log.Info("UpdateSegment success", zap.String("request", req.String()))
 	return res, nil
 }

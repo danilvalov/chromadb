@@ -1,30 +1,32 @@
 # type: ignore
-import traceback
-import httpx
-
-import chromadb
-from chromadb.errors import ChromaError
-from chromadb.api.fastapi import FastAPI
-from chromadb.api.types import QueryResult, EmbeddingFunction, Document
-from chromadb.config import Settings
-from chromadb.errors import InvalidCollectionException
-import chromadb.server.fastapi
-import pytest
-import tempfile
-import numpy as np
 import os
 import shutil
+import sys
+import tempfile
+import traceback
 from datetime import datetime, timedelta
-from chromadb.utils.embedding_functions import (
-    DefaultEmbeddingFunction,
-)
+from typing import Any
 
-persist_dir = tempfile.mkdtemp()
+import httpx
+import numpy as np
+import pytest
 
+import chromadb
+import chromadb.server.fastapi
+from chromadb.api.fastapi import FastAPI
+from chromadb.api.types import Document, EmbeddingFunction, QueryResult
+from chromadb.config import Settings
+from chromadb.errors import ChromaError, InvalidArgumentError, NotFoundError
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 
 @pytest.fixture
-def local_persist_api():
+def persist_dir():
+    return tempfile.mkdtemp()
+
+
+@pytest.fixture
+def local_persist_api(persist_dir):
     client = chromadb.Client(
         Settings(
             chroma_api_impl="chromadb.api.segment.SegmentAPI",
@@ -45,7 +47,7 @@ def local_persist_api():
 
 # https://docs.pytest.org/en/6.2.x/fixture.html#fixtures-can-be-requested-more-than-once-per-test-return-values-are-cached
 @pytest.fixture
-def local_persist_api_cache_bust():
+def local_persist_api_cache_bust(persist_dir):
     client = chromadb.Client(
         Settings(
             chroma_api_impl="chromadb.api.segment.SegmentAPI",
@@ -105,6 +107,18 @@ def test_persist_index_loading_embedding_function(api_fixture, request):
         def __call__(self, input):
             return [np.array([1, 2, 3]) for _ in range(len(input))]
 
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+
+        def name(self) -> str:
+            return "test"
+
+        def build_from_config(self, config: dict[str, Any]) -> None:
+            pass
+
+        def get_config(self) -> dict[str, Any]:
+            return {}
+
     client = request.getfixturevalue("local_persist_api")
     client.reset()
     collection = client.create_collection("test", embedding_function=TestEF())
@@ -133,6 +147,18 @@ def test_persist_index_get_or_create_embedding_function(api_fixture, request):
     class TestEF(EmbeddingFunction[Document]):
         def __call__(self, input):
             return [np.array([1, 2, 3]) for _ in range(len(input))]
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+
+        def name(self) -> str:
+            return "test"
+
+        def build_from_config(self, config: dict[str, Any]) -> None:
+            pass
+
+        def get_config(self) -> dict[str, Any]:
+            return {}
 
     api = request.getfixturevalue("local_persist_api")
     api.reset()
@@ -195,9 +221,33 @@ def test_heartbeat(client):
 
 
 def test_max_batch_size(client):
-    print(client)
     batch_size = client.get_max_batch_size()
     assert batch_size > 0
+
+
+def test_supports_base64_encoding(client):
+    if not isinstance(client, FastAPI):
+        pytest.skip("Not a FastAPI instance")
+
+    client.reset()
+
+    supports_base64_encoding = client.supports_base64_encoding()
+    assert supports_base64_encoding is True
+
+
+def test_supports_base64_encoding_legacy(client):
+    if not isinstance(client, FastAPI):
+        pytest.skip("Not a FastAPI instance")
+
+    client.reset()
+
+    # legacy server does not give back supports_base64_encoding
+    client.pre_flight_checks = {
+        "max_batch_size": 100,
+    }
+
+    assert client.supports_base64_encoding() is False
+    assert client.get_max_batch_size() == 100
 
 
 def test_pre_flight_checks(client):
@@ -208,6 +258,7 @@ def test_pre_flight_checks(client):
     assert resp.status_code == 200
     assert resp.json() is not None
     assert "max_batch_size" in resp.json().keys()
+    assert "supports_base64_encoding" in resp.json().keys()
 
 
 batch_records = {
@@ -231,9 +282,7 @@ def test_collection_add_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.add(**batch_records)
 
 
@@ -290,9 +339,7 @@ def test_collection_get_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.get()
 
 
@@ -362,12 +409,14 @@ def test_delete(client):
     with pytest.raises(Exception):
         collection.delete()
 
+
 def test_delete_returns_none(client):
     client.reset()
     collection = client.create_collection("testspace")
     collection.add(**batch_records)
     assert collection.count() == 2
     assert collection.delete(ids=batch_records["ids"]) is None
+
 
 def test_delete_with_index(client):
     client.reset()
@@ -382,9 +431,7 @@ def test_collection_delete_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.delete(ids=["id1"])
 
 
@@ -401,9 +448,7 @@ def test_collection_count_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.count()
 
 
@@ -421,9 +466,7 @@ def test_collection_modify_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.modify(name="test2")
 
 
@@ -571,6 +614,7 @@ def test_peek(client):
 
     # peek
     peek = collection.peek()
+    print(peek)
     for key in peek.keys():
         if key in ["embeddings", "documents", "metadatas"] or key == "ids":
             assert len(peek[key]) == 2
@@ -585,9 +629,7 @@ def test_collection_peek_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.peek()
 
 
@@ -596,9 +638,7 @@ def test_collection_query_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.query(query_texts=["test"])
 
 
@@ -607,9 +647,7 @@ def test_collection_update_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.update(ids=["id1"], documents=["test"])
 
 
@@ -797,7 +835,6 @@ def test_where_ne_eq_number(client):
     assert len(items["metadatas"]) == 1
 
 
-
 def test_where_valid_operators(client):
     client.reset()
     collection = client.create_collection("test_where_valid_operators")
@@ -869,7 +906,7 @@ def test_dimensionality_validation_add(client):
 
     with pytest.raises(Exception) as e:
         collection.add(**bad_dimensionality_records)
-    assert "dimensionality" in str(e.value)
+    assert "dimension" in str(e.value)
 
 
 def test_dimensionality_validation_query(client):
@@ -879,7 +916,7 @@ def test_dimensionality_validation_query(client):
 
     with pytest.raises(Exception) as e:
         collection.query(**bad_dimensionality_query)
-    assert "dimensionality" in str(e.value)
+    assert "dimension" in str(e.value)
 
 
 def test_query_document_valid_operators(client):
@@ -894,6 +931,14 @@ def test_query_document_valid_operators(client):
 
     with pytest.raises(ValueError, match="where document"):
         collection.get(where_document={"$contains": []})
+
+    # Test invalid $contains
+    with pytest.raises(ValueError, match="where document"):
+        collection.get(where_document={"$contains": {"text": "hello"}})
+
+    # Test invalid $not_contains
+    with pytest.raises(ValueError, match="where document"):
+        collection.get(where_document={"$not_contains": {"text": "hello"}})
 
     # Test invalid $and, $or
     with pytest.raises(ValueError):
@@ -1099,16 +1144,17 @@ def test_where_document_logical_operators(client):
     )
     assert len(items["metadatas"]) == 1
 
+
 def test_where_like_string(client):
     client.reset()
     collection = client.create_collection("test_where_like")
     collection.add(**operator_records)
-    #Exact match.
+    # Exact match.
     items = collection.get(where={"string_value": {"$like": "one"}})
     assert len(items["metadatas"]) == 1
     items = collection.get(where={"string_value": {"$like": "two"}})
     assert len(items["metadatas"]) == 1
-    #partial matches
+    # partial matches
     items = collection.get(where={"string_value": {"$like": "%"}})
     assert len(items["metadatas"]) == 2
     items = collection.get(where={"string_value": {"$like": "%wo%"}})
@@ -1128,17 +1174,18 @@ def test_where_like_string(client):
     items = collection.get(where={"string_value": {"$nlike": "%o%"}})
     assert len(items["metadatas"]) == 0
 
-    items = collection.get(where={"string_value": {"$like": r"o\%"}}) 
+    items = collection.get(where={"string_value": {"$like": r"o\%"}})
     assert len(items["metadatas"]) == 0
-    items = collection.get(where={"string_value": {"$like": r"o\__"}}) 
+    items = collection.get(where={"string_value": {"$like": r"o\__"}})
     assert len(items["metadatas"]) == 0
+
 
 def test_where_like_string_case_sensitive(client):
     client.reset()
     collection = client.create_collection("test_where_like")
-    
+
     collection.add(**operator_records)
-    #Exact match.
+    # Exact match.
     items = collection.get(where={"string_value": {"$like": "one"}})
     assert len(items["metadatas"]) == 1
     items = collection.get(where={"string_value": {"$like": "two"}})
@@ -1147,7 +1194,7 @@ def test_where_like_string_case_sensitive(client):
     assert len(items["metadatas"]) == 0
     items = collection.get(where={"string_value": {"$like": "Two"}})
     assert len(items["metadatas"]) == 0
-    #partial matches
+    # partial matches
 
     items = collection.get(where={"string_value": {"$like": "%o"}})
     assert len(items["metadatas"]) == 1
@@ -1174,9 +1221,13 @@ def test_where_valid_operators_like(client):
     collection = client.create_collection("test_where_valid_like_operators")
     collection.add(**operator_records)
 
-    with pytest.raises(ValueError,match=r".* operand value to be an string for operator \$like.*"):
+    with pytest.raises(
+        ValueError, match=r".* operand value to be an string for operator \$like.*"
+    ):
         collection.get(where={"b": {"$like": 4}})  # invalid
-    with pytest.raises(ValueError,match=r".* operand value to be an string for operator \$like.*"):
+    with pytest.raises(
+        ValueError, match=r".* operand value to be an string for operator \$like.*"
+    ):
         collection.get(
             where={
                 "$or": [
@@ -1187,7 +1238,7 @@ def test_where_valid_operators_like(client):
             }
         )
 
-    
+
 # endregion
 
 records = {
@@ -1356,13 +1407,7 @@ def test_index_params(client):
 def test_invalid_index_params(client):
     client.reset()
 
-    with pytest.raises(Exception):
-        collection = client.create_collection(
-            name="test_index_params", metadata={"hnsw:foobar": "blarg"}
-        )
-        collection.add(**records)
-
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidArgumentError):
         collection = client.create_collection(
             name="test_index_params", metadata={"hnsw:space": "foobar"}
         )
@@ -1464,6 +1509,12 @@ def test_multiple_collections(client):
 
     results1 = coll1.query(query_embeddings=embeddings1[0], n_results=1)
     results2 = coll2.query(query_embeddings=embeddings2[0], n_results=1)
+
+    # progressively check the results are what we expect so we can debug when/if flakes happen
+    assert len(results1["ids"]) > 0
+    assert len(results2["ids"]) > 0
+    assert len(results1["ids"][0]) > 0
+    assert len(results2["ids"][0]) > 0
 
     assert results1["ids"][0][0] == ids1[0]
     assert results2["ids"][0][0] == ids2[0]
@@ -1623,9 +1674,7 @@ def test_collection_upsert_with_invalid_collection_throws(client):
     collection = client.create_collection("test")
     client.delete_collection("test")
 
-    with pytest.raises(
-        InvalidCollectionException, match=r"Collection .* does not exist."
-    ):
+    with pytest.raises(NotFoundError, match=r"Collection .* does not exist."):
         collection.upsert(**initial_records)
 
 
@@ -1682,7 +1731,7 @@ def test_dimensionality_exception_update(client):
 
     with pytest.raises(Exception) as e:
         collection.update(**bad_dimensionality_records)
-    assert "dimensionality" in str(e.value)
+    assert "dimension" in str(e.value)
 
 
 # test to make sure upsert shows exception for bad dimensionality
@@ -1695,15 +1744,19 @@ def test_dimensionality_exception_upsert(client):
 
     with pytest.raises(Exception) as e:
         collection.upsert(**bad_dimensionality_records)
-    assert "dimensionality" in str(e.value)
+    assert "dimension" in str(e.value)
 
 
+# this may be flaky on windows, so we rerun it
+@pytest.mark.flaky(reruns=3, condition=sys.platform.startswith("win32"))
 def test_ssl_self_signed(client_ssl):
     if os.environ.get("CHROMA_INTEGRATION_TEST_ONLY"):
         pytest.skip("Skipping test for integration test")
     client_ssl.heartbeat()
 
 
+# this may be flaky on windows, so we rerun it
+@pytest.mark.flaky(reruns=3, condition=sys.platform.startswith("win32"))
 def test_ssl_self_signed_without_ssl_verify(client_ssl):
     if os.environ.get("CHROMA_INTEGRATION_TEST_ONLY"):
         pytest.skip("Skipping test for integration test")
@@ -1718,3 +1771,156 @@ def test_ssl_self_signed_without_ssl_verify(client_ssl):
     assert "CERTIFICATE_VERIFY_FAILED" in "".join(stack_trace)
 
 
+def test_query_id_filtering_small_dataset(client):
+    client.reset()
+    collection = client.create_collection("test_query_id_filtering_small")
+
+    num_vectors = 100
+    dim = 512
+    small_records = np.random.rand(100, 512).astype(np.float32).tolist()
+    ids = [f"{i}" for i in range(num_vectors)]
+
+    collection.add(
+        embeddings=small_records,
+        ids=ids,
+    )
+
+    query_ids = [f"{i}" for i in range(0, num_vectors, 10)]
+    query_embedding = np.random.rand(dim).astype(np.float32).tolist()
+    results = collection.query(
+        query_embeddings=query_embedding,
+        ids=query_ids,
+        n_results=num_vectors,
+        include=[],
+    )
+
+    all_returned_ids = [item for sublist in results["ids"] for item in sublist]
+    assert all(id in query_ids for id in all_returned_ids)
+
+
+def test_query_id_filtering_medium_dataset(client):
+    client.reset()
+    collection = client.create_collection("test_query_id_filtering_medium")
+
+    num_vectors = 1000
+    dim = 512
+    medium_records = np.random.rand(num_vectors, dim).astype(np.float32).tolist()
+    ids = [f"{i}" for i in range(num_vectors)]
+
+    collection.add(
+        embeddings=medium_records,
+        ids=ids,
+    )
+
+    query_ids = [f"{i}" for i in range(0, num_vectors, 10)]
+
+    query_embedding = np.random.rand(dim).astype(np.float32).tolist()
+    results = collection.query(
+        query_embeddings=query_embedding,
+        ids=query_ids,
+        n_results=num_vectors,
+        include=[],
+    )
+
+    all_returned_ids = [item for sublist in results["ids"] for item in sublist]
+    assert all(id in query_ids for id in all_returned_ids)
+
+    multi_query_embeddings = [
+        np.random.rand(dim).astype(np.float32).tolist() for _ in range(3)
+    ]
+    multi_results = collection.query(
+        query_embeddings=multi_query_embeddings,
+        ids=query_ids,
+        n_results=10,
+        include=[],
+    )
+
+    for result_set in multi_results["ids"]:
+        assert all(id in query_ids for id in result_set)
+
+
+def test_query_id_filtering_e2e(client):
+    client.reset()
+    collection = client.create_collection("test_query_id_filtering_e2e")
+
+    dim = 512
+    num_vectors = 100
+    embeddings = np.random.rand(num_vectors, dim).astype(np.float32).tolist()
+    ids = [f"{i}" for i in range(num_vectors)]
+    metadatas = [{"index": i} for i in range(num_vectors)]
+
+    collection.add(
+        embeddings=embeddings,
+        ids=ids,
+        metadatas=metadatas,
+    )
+
+    ids_to_delete = [f"{i}" for i in range(10, 30)]
+    collection.delete(ids=ids_to_delete)
+
+    # modify some existing ids, and add some new ones to check query returns updated metadata
+    ids_to_upsert_existing = [f"{i}" for i in range(30, 50)]
+    new_num_vectors = num_vectors + 20
+    ids_to_upsert_new = [f"{i}" for i in range(num_vectors, new_num_vectors)]
+
+    upsert_embeddings = (
+        np.random.rand(len(ids_to_upsert_existing) + len(ids_to_upsert_new), dim)
+        .astype(np.float32)
+        .tolist()
+    )
+    upsert_metadatas = [
+        {"index": i, "upserted": True} for i in range(len(upsert_embeddings))
+    ]
+
+    collection.upsert(
+        embeddings=upsert_embeddings,
+        ids=ids_to_upsert_existing + ids_to_upsert_new,
+        metadatas=upsert_metadatas,
+    )
+
+    valid_query_ids = (
+        [f"{i}" for i in range(5, 10)]  # subset of existing ids
+        + [f"{i}" for i in range(35, 45)]  # subset of existing, but upserted
+        + [
+            f"{i}" for i in range(num_vectors + 5, num_vectors + 15)
+        ]  # subset of new upserted ids
+    )
+
+    includes = ["metadatas"]
+    query_embedding = np.random.rand(dim).astype(np.float32).tolist()
+    results = collection.query(
+        query_embeddings=query_embedding,
+        ids=valid_query_ids,
+        n_results=new_num_vectors,
+        include=includes,
+    )
+
+    all_returned_ids = [item for sublist in results["ids"] for item in sublist]
+    assert all(id in valid_query_ids for id in all_returned_ids)
+
+    for result_index, id_list in enumerate(results["ids"]):
+        for item_index, item_id in enumerate(id_list):
+            if item_id in ids_to_upsert_existing or item_id in ids_to_upsert_new:
+                # checks if metadata correctly has upserted flag
+                assert results["metadatas"][result_index][item_index]["upserted"]
+
+    upserted_id = ids_to_upsert_existing[0]
+    # test single id filtering
+    results = collection.query(
+        query_embeddings=query_embedding,
+        ids=upserted_id,
+        n_results=1,
+        include=includes,
+    )
+    assert results["metadatas"][0][0]["upserted"]
+
+    deleted_id = ids_to_delete[0]
+    # test deleted id filter raises
+    with pytest.raises(Exception) as error:
+        collection.query(
+            query_embeddings=query_embedding,
+            ids=deleted_id,
+            n_results=1,
+            include=includes,
+        )
+    assert "Error finding id" in str(error.value)

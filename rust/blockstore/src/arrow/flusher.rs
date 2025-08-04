@@ -14,6 +14,7 @@ pub struct ArrowBlockfileFlusher {
     blocks: Vec<Block>,
     root: RootWriter,
     id: Uuid,
+    count: u64,
 }
 
 impl ArrowBlockfileFlusher {
@@ -23,6 +24,7 @@ impl ArrowBlockfileFlusher {
         blocks: Vec<Block>,
         root: RootWriter,
         id: Uuid,
+        count: u64,
     ) -> Self {
         Self {
             block_manager,
@@ -30,6 +32,7 @@ impl ArrowBlockfileFlusher {
             blocks,
             root,
             id,
+            count,
         }
     }
 
@@ -44,19 +47,20 @@ impl ArrowBlockfileFlusher {
         // Flush all blocks in parallel using futures unordered
         // NOTE(hammadb) we do not use try_join_all here because we want to flush all blocks
         // in parallel and try_join_all / join_all switches to using futures_ordered if the
-        // number of futures is high. However, our NAC controls the number of futures that can be
-        // created at once, so that behavior is redudant and suboptimal for us.
-        // As of 10/28 the NAC does not impact the write path, only the read path.
-        // As a workaround we used buffered futures to reduce concurrency
-        // once the NAC supports write path admission control we can switch back
-        // to unbuffered futures.
-
+        // number of futures is high.
         let mut futures = Vec::new();
         for block in &self.blocks {
-            futures.push(self.block_manager.flush(block));
+            futures.push(self.block_manager.flush(block, &self.root.prefix_path));
         }
+        let num_futures = futures.len();
+        // buffer_unordered hangs with 0 futures.
+        if num_futures == 0 {
+            self.root_manager.flush::<K>(&self.root).await?;
+            return Ok(());
+        }
+        tracing::debug!("Flushing {} blocks", num_futures);
         futures::stream::iter(futures)
-            .buffer_unordered(30)
+            .buffer_unordered(num_futures)
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -66,5 +70,17 @@ impl ArrowBlockfileFlusher {
 
     pub(crate) fn id(&self) -> Uuid {
         self.id
+    }
+
+    pub(crate) fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub(crate) fn num_entries(&self) -> usize {
+        self.blocks.iter().fold(0, |acc, block| acc + block.len())
+    }
+
+    pub(crate) fn prefix_path(&self) -> &str {
+        &self.root.prefix_path
     }
 }

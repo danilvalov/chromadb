@@ -52,8 +52,48 @@ func (s *Server) GetDatabase(ctx context.Context, req *coordinatorpb.GetDatabase
 		Name:   database.Name,
 		Tenant: database.Tenant,
 	}
-	log.Info("GetDatabase success", zap.String("request", req.String()))
 	return res, nil
+}
+
+func (s *Server) ListDatabases(ctx context.Context, req *coordinatorpb.ListDatabasesRequest) (*coordinatorpb.ListDatabasesResponse, error) {
+	res := &coordinatorpb.ListDatabasesResponse{}
+	listDatabases := &model.ListDatabases{
+		Limit:  req.Limit,
+		Offset: req.Offset,
+		Tenant: req.GetTenant(),
+	}
+	databases, err := s.coordinator.ListDatabases(ctx, listDatabases)
+	if err != nil {
+		log.Error("error ListDatabases", zap.String("request", req.String()), zap.Error(err))
+		if err == common.ErrTenantNotFound {
+			return res, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		return res, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	for _, database := range databases {
+		res.Databases = append(res.Databases, &coordinatorpb.Database{
+			Id:     database.ID,
+			Name:   database.Name,
+			Tenant: database.Tenant,
+		})
+	}
+	return res, nil
+}
+
+func (s *Server) DeleteDatabase(ctx context.Context, req *coordinatorpb.DeleteDatabaseRequest) (*coordinatorpb.DeleteDatabaseResponse, error) {
+	deleteDatabase := &model.DeleteDatabase{
+		Name:   req.GetName(),
+		Tenant: req.GetTenant(),
+	}
+	err := s.coordinator.DeleteDatabase(ctx, deleteDatabase)
+	if err != nil {
+		log.Error("error DeleteDatabase", zap.String("request", req.String()), zap.Error(err))
+		if errors.Is(err, common.ErrDatabaseNotFound) {
+			return nil, grpcutils.BuildNotFoundGrpcError(err.Error())
+		}
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	return &coordinatorpb.DeleteDatabaseResponse{}, nil
 }
 
 func (s *Server) CreateTenant(ctx context.Context, req *coordinatorpb.CreateTenantRequest) (*coordinatorpb.CreateTenantResponse, error) {
@@ -87,9 +127,9 @@ func (s *Server) GetTenant(ctx context.Context, req *coordinatorpb.GetTenantRequ
 		return res, grpcutils.BuildInternalGrpcError(err.Error())
 	}
 	res.Tenant = &coordinatorpb.Tenant{
-		Name: tenant.Name,
+		Name:         tenant.Name,
+		ResourceName: tenant.ResourceName,
 	}
-	log.Info("GetTenant success", zap.String("request", req.String()))
 	return res, nil
 }
 
@@ -101,6 +141,15 @@ func (s *Server) SetLastCompactionTimeForTenant(ctx context.Context, req *coordi
 	}
 	log.Info("SetLastCompactionTimeForTenant success", zap.String("request", req.String()))
 	return &emptypb.Empty{}, nil
+}
+
+func (s *Server) SetTenantResourceName(ctx context.Context, req *coordinatorpb.SetTenantResourceNameRequest) (*coordinatorpb.SetTenantResourceNameResponse, error) {
+	err := s.coordinator.SetTenantResourceName(ctx, req.Id, req.ResourceName)
+	if err != nil {
+		log.Error("error SetTenantResourceName", zap.String("request", req.String()), zap.Error(err))
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
+	return &coordinatorpb.SetTenantResourceNameResponse{}, nil
 }
 
 func (s *Server) GetLastCompactionTimeForTenant(ctx context.Context, req *coordinatorpb.GetLastCompactionTimeForTenantRequest) (*coordinatorpb.GetLastCompactionTimeForTenantResponse, error) {
@@ -117,6 +166,13 @@ func (s *Server) GetLastCompactionTimeForTenant(ctx context.Context, req *coordi
 			LastCompactionTime: tenant.LastCompactionTime,
 		})
 	}
-	log.Info("GetLastCompactionTimeForTenant success", zap.String("request", req.String()))
+	return res, nil
+}
+
+func (s *Server) FinishDatabaseDeletion(ctx context.Context, req *coordinatorpb.FinishDatabaseDeletionRequest) (*coordinatorpb.FinishDatabaseDeletionResponse, error) {
+	res, err := s.coordinator.FinishDatabaseDeletion(ctx, req)
+	if err != nil {
+		return nil, grpcutils.BuildInternalGrpcError(err.Error())
+	}
 	return res, nil
 }
